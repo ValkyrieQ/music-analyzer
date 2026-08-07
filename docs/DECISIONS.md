@@ -92,10 +92,37 @@ after the onset. The median (not mean) is taken over the window so one loud pass
 cannot flip the chord.
 
 ### Viterbi, not argmax
-Frame-wise argmax flickers between relative chords constantly. The transition matrix is
-deliberately simple — a single self-transition bonus (3.4, tuned by ear) — because that one
-knob removes nearly all the flicker. A per-key circle-of-fifths-weighted matrix would do
-marginally better and be much harder to reason about.
+Frame-wise argmax flickers between relative chords constantly. A single self-transition bonus
+(3.4, tuned by ear) removes nearly all the flicker on its own — that used to be the whole
+transition matrix, with a comment saying a circle-of-fifths-weighted version "would do
+marginally better and be much harder to reason about." It turned out worth doing: see
+"A key-aware, circle-of-fifths transition matrix" below. It is layered on top of the same
+self-transition bonus, not a replacement for it.
+
+### A key-aware, circle-of-fifths transition matrix
+The flat transition matrix penalised every *change* equally — a new chord a fifth away (the
+overwhelmingly common move in tonal music) cost the decoder exactly as much as one a tritone
+away (the rarest). That is real information the decoder was throwing away for free: given two
+labels that fit the audio about equally well, the one that is a more natural next chord should
+win the tie.
+
+`_transition_logprob` now costs a change by how far its root sits from the previous chord on the
+circle of fifths (`COF_WEIGHT`, scaled 0 at the same root to the full weight at a tritone away),
+and gives a small bonus to landing on a root that is in the track's own detected key
+(`DIATONIC_BONUS`, from `key_detect`'s `scale_pitches` — already computed earlier in the
+pipeline, so this costs nothing new to obtain). The key bias is skipped when `key.confidence <
+0.3`: a key guessed on thin evidence is as likely to steer the chords wrong as right, and this
+bias only earns its place when the key itself is trustworthy.
+
+Both weights were tuned down hard from the first guess. `COF_WEIGHT=1.2` sounded reasonable in
+isolation but pushed a `vi-IV-I-V` progression's opening `F#m` to decode as its relative major
+`D` instead — cosine similarity barely favours one over the other (they share two of three
+chord tones), and a strong "the rest of the track moves by fifths a lot" prior was enough to
+override that thin emission evidence at the very first beat, before there was any path history
+to lean on. `COF_WEIGHT=0.3, DIATONIC_BONUS=0.15` (a quarter of the first guess) fixed that
+fixture with no loss on the other two — the lesson being that a structural prior should nudge
+a close call, not overrule the audio, and that has to be checked against a real decode, not
+reasoned about from the formula.
 
 ### Template weighting and quality priors
 Richer templates have more non-zero bins and therefore win cosine similarity too often;
@@ -122,6 +149,31 @@ positions where the chord changes — in the material this tool targets, chords 
 barline. It only overrides when one phase is a clear winner, so a static vamp or a syncopated
 section falls back to the onset-based guess. `verify.py` asserts bar alignment separately
 from chord accuracy, because the two fail independently.
+
+### Beat tracking needs the full mix, not just drums, or a quiet intro has no grid at all
+`rhythm.analyse` used to run `onset_strength` on the isolated **drums** stem alone — cleaner
+onsets, better tempo lock. But a drums-only stem is not quietly weaker where the kit lays out
+for an intro or a sparse verse, it is **exactly zero**: `onset_strength` on silence is zero at
+every frame, not "uncertain", so `beat_track` has nothing to lock onto there. On a real song
+with a 65-second vocal-and-guitar intro before the drums come in, this meant the *entire* beat
+grid — and everything downstream that is indexed by it: bars, chord spans, downbeats — started
+at 65.3s on a 250s track. The chord sheet visibly began in the middle of the song, and the
+generated harmony had nothing to attach to for the first two verses, because
+`harmony._chord_at` returns `None` for any note before the first chord span exists.
+
+Fix: `rhythm.analyse` takes an optional `y_full` (the whole mix) and blends its onset envelope
+with the percussive one — `np.maximum` of each independently peak-normalised, so the full mix
+only fills in where percussive is silent rather than diluting the cleaner signal everywhere.
+Measured on the drum-heavy chorus of the same track, beat times from the blended envelope were
+identical to drums-only to the millisecond; the difference only shows up where it needs to.
+
+One trap this produced: `_fix_tempo_octave`'s 0.33 threshold was calibrated against how much a
+drum pattern's off-beat midpoints leak (~0%) versus a genuinely half-rate lock (~50%). The full
+mix's onset envelope is continuous — sustained harmony and vocal consonants land energy on the
+midpoints too — which pushed a *correctly* tracked 117 BPM over that threshold and "fixed" it
+to 235 BPM, a real regression caught only by re-running `verify.py` and a real download. The
+octave check has to keep running against the percussive-only envelope; only `beat_track` itself
+runs on the blended one.
 
 ### Confidence is a margin, not a posterior
 Per-beat confidence is the chosen chord's share against its closest rival — `best / (best +
@@ -302,13 +354,49 @@ underneath, takes the nearest, and returns `None` — emitting nothing — if th
 vibrato and tracker jitter, and the result warbles. Notes are segmented and shifted whole, with
 12 ms raised-cosine fades at the joins.
 
-**Rendered on first request, then cached.** pyin costs ~8 s on a 2-minute vocal. Putting that in
-the analysis pipeline would work directly against the goal of this round, which was making
-analysis faster. Instrumentals are rejected before pyin runs (vocal level `< 1e-3`) and return
-422, so the endpoint fails fast and legibly instead of returning silence.
+**Note segmentation has to bridge short confidence dropouts, or vibrato itself fragments a note.**
+The first version cut a new note the instant pyin's voicing probability dipped below
+`VOICED_MIN_PROB`. Measured on a real vocal, that probability oscillates above and below 0.5
+*during a single sustained note* — ordinary vibrato and pitch wobble drag it under for a couple
+of frames at a time, repeatedly, even though a listener hears one continuous note. Without
+bridging, one note was cut into 5-6 fragments (656 raw confident runs collapsed to 123 once gaps
+up to 150ms were bridged), each rendered as its own independent `pitch_shift` call with its own
+fade — not wrong notes, but the same note stuttering and re-attacking every 100-150ms, which is
+exactly what a user reported as "unintelligible." `_bridge_gaps` fills short `False` runs in the
+voicing mask when they are flanked by confident voicing on both sides (never at the very start
+or end, where there is nothing to interpolate between); the pitch across a bridged gap is filled
+by linear interpolation in log-frequency (`np.interp` on MIDI numbers) rather than held flat or
+left `NaN`, since a gap this short is by construction mid-note. Effect on the same real vocal:
+median note length 0.16s → 0.26s, notes under 200ms (i.e. audible fragments) 62% → 37%.
+
+**Rendered on first request, then cached.** Pitch-tracking the vocal and rendering every note has
+measured up to ~90s on a real 3-4 minute song — considerably more than an early "~8s" estimate
+based on a short clip suggested. Putting that in the analysis pipeline would work directly against
+the goal of making analysis faster. Instrumentals are rejected before pyin runs (vocal level
+`< 1e-3`) and return 422, so the endpoint fails fast and legibly instead of returning silence. The
+UI ticks an elapsed-seconds counter on the button while it waits, rather than a static "building…"
+label — at this length, a label that never changes reads as stuck, which is exactly the complaint
+this produced ("ทำไมต้องรอ process อะไรบางอย่าง ไม่ download เลยเหมือน stem อื่น").
 
 That 422 is also why the frontend fetches harmony rather than using `<a download>`: following a
 link to an endpoint that legitimately returns JSON would replace the page with raw JSON.
+
+**The harmony bus is rendered once and mixed two ways.** `harmony.build_bus` does the slow part
+(pitch tracking + per-note shifting) and returns the backing-voice signal alone.
+`harmony.generate` mixes it under the isolated vocal (the standalone download);
+`harmony.generate_with_track` mixes the *same* bus under the full song instead, for the
+Transport bar's "Play with harmony" toggle — swapping the player's audio source rather than
+downloading a file. The two must not both re-add the lead vocal: `generate_with_track` mixes the
+bus into `full_mix` as-is, because the lead is already in that signal. Each mix is a separate
+cached file (`harmony.mp3` / `harmony_with_track.mp3`) behind its own endpoint
+(`/harmony` / `/harmony/with-track`), so downloading one does not force rendering the other, but
+neither re-runs pitch tracking if the other was requested first — day-two chords would need
+`build_bus` re-run since it takes the decoded chords as an argument, but the render itself does
+not depend on which mixdown is wanted.
+
+Transposition is not offered while "Play with harmony" is on: the harmony render has no
+pitch-shifted variant, and offering the control would either silently do nothing or need a third
+render path for a combination nobody asked for.
 
 ---
 

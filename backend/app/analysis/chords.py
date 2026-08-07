@@ -196,14 +196,68 @@ def _emission_logprob(
     return logits - np.log(np.exp(logits).sum(axis=1, keepdims=True))
 
 
-def _transition_logprob(n_labels: int, self_bonus: float = 3.4) -> np.ndarray:
-    """Uniform change penalty with a bonus for staying put.
+# How strongly a change is discouraged the further its root sits from the previous
+# chord on the circle of fifths. Real progressions overwhelmingly move by a fifth or
+# stay put; a root change a tritone away is the rarest move in tonal music. Distance is
+# normalised to [0, 1] (0 = same root, 1 = a tritone away) before this weight is applied,
+# so the number below is directly the log-probability cost of the single worst jump.
+#
+# Tuned against the synthetic fixtures, not guessed: the first value tried (1.2) pushed a
+# vi-IV-I-V progression's opening F#m to be decoded as its relative major D instead (they
+# share two of three chord tones, so the emission alone barely favours one), because a
+# large circle-of-fifths bonus for "the rest of the track turns out to move by fifths a
+# lot" outweighed that thin emission evidence. 0.3 fixed it and cost nothing on the other
+# two fixtures — the structural prior should nudge a close call, not overrule the audio.
+COF_WEIGHT = 0.3
 
-    A full trained transition matrix (per key, circle-of-fifths weighted) would do a
-    little better, but this single knob already removes nearly all of the per-beat
-    flicker and keeps the model easy to reason about.
+# Bonus for moving *into* a chord whose root is in the track's detected key. Applied only
+# to the destination root, since a transition's plausibility is about where you're going,
+# not where you came from — modulating out of the home key briefly is normal, but the
+# decoder should need real evidence for it rather than drifting there for free.
+DIATONIC_BONUS = 0.15
+
+
+def _transition_logprob(
+    vocab: ChordVocab,
+    self_bonus: float = 3.4,
+    key_pitches: frozenset[int] | None = None,
+) -> np.ndarray:
+    """Change penalty shaped by music theory, not just a flat "stay" bonus.
+
+    Real chord progressions are not a uniform random walk over the label set: they move
+    by a fifth far more often than a tritone, and they gravitate toward the tonal centre
+    the rest of the track establishes. A transition matrix that only rewards staying put
+    (the previous version) removes flicker but treats every *change* as equally likely,
+    so a wrong chord next door on the circle of fifths and a wrong chord a tritone away
+    cost the decoder the same — the acknowledged weak point of this decoder before this
+    change. Weighting by circle-of-fifths distance and by the detected key directly
+    targets that, using signal (the key) the pipeline already computes for free.
+
+    Args:
+        key_pitches: pitch classes of the track's detected key/scale. When given, moving
+            to a diatonic root gets a bonus. Omit to fall back to circle-of-fifths
+            shaping alone (used by tests that decode chroma with no key context).
     """
+    n_labels = len(vocab.labels)
     trans = np.zeros((n_labels, n_labels), dtype=np.float64)
+
+    roots = np.array([r if r is not None else -1 for r in vocab.roots])
+    has_root = roots >= 0
+
+    # Steps around the circle of fifths from root i to root j. 7 is invertible mod 12
+    # (7*7 = 49 = 1 mod 12), so multiplying the semitone difference by 7 converts "steps
+    # of a semitone" into "steps of a fifth" without a lookup table.
+    semitone_diff = roots[None, :] - roots[:, None]
+    fifths_steps = np.mod(semitone_diff * 7, 12)
+    cof_distance = np.minimum(fifths_steps, 12 - fifths_steps)  # 0..6
+
+    both_rooted = has_root[:, None] & has_root[None, :]
+    trans = np.where(both_rooted, -COF_WEIGHT * cof_distance / 6.0, 0.0)
+
+    if key_pitches:
+        diatonic = np.isin(roots, list(key_pitches))
+        trans += np.where(both_rooted & diatonic[None, :], DIATONIC_BONUS, 0.0)
+
     np.fill_diagonal(trans, self_bonus)
     trans -= np.log(np.exp(trans).sum(axis=1, keepdims=True))
     return trans
@@ -252,6 +306,7 @@ def recognise(
     beat_times: np.ndarray,
     audio_duration: float,
     beat_loudness: np.ndarray | None = None,
+    key_pitches: list[int] | None = None,
 ) -> list[BeatChord]:
     """Decode a chord label for every beat.
 
@@ -261,6 +316,9 @@ def recognise(
         audio_duration: total track length, used to close the final beat's interval.
         beat_loudness: (n_beats,) per-beat RMS of the harmonic signal. Supplying it is
             what lets "no chord" be reserved for genuinely silent beats.
+        key_pitches: pitch classes of the track's detected key/scale, from
+            `key_detect.detect(...).scale_pitches`. Biases the transition matrix toward
+            chords in that key — see `_transition_logprob`.
     """
     n_beats = beat_chroma.shape[1]
     if n_beats == 0 or beat_times.size == 0:
@@ -271,7 +329,11 @@ def recognise(
         )
 
     emission = _emission_logprob(beat_chroma, VOCAB, loudness=beat_loudness)
-    path = _viterbi(emission, _transition_logprob(len(VOCAB.labels)))
+    transition = _transition_logprob(
+        VOCAB,
+        key_pitches=frozenset(key_pitches) if key_pitches else None,
+    )
+    path = _viterbi(emission, transition)
 
     # Per-beat confidence for the UI, as the chosen label's share against its closest
     # rival: 0.5 at a dead tie, approaching 1.0 when nothing else comes close.

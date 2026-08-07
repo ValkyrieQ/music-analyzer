@@ -29,6 +29,9 @@ export default function Transport({
   onAutoScrollChange,
   showRomanNumerals,
   onShowRomanNumeralsChange,
+  harmonyAvailable,
+  harmonyMode,
+  onHarmonyModeChange,
 }) {
   const progress = duration > 0 ? (position / duration) * 100 : 0
 
@@ -88,7 +91,7 @@ export default function Transport({
               type="button"
               className="btn btn--step"
               onClick={() => onSemitonesChange(Math.max(-12, semitones - 1))}
-              disabled={semitones <= -12}
+              disabled={semitones <= -12 || harmonyMode}
               aria-label="Transpose down one semitone"
             >
               −
@@ -101,13 +104,18 @@ export default function Transport({
               type="button"
               className="btn btn--step"
               onClick={() => onSemitonesChange(Math.min(12, semitones + 1))}
-              disabled={semitones >= 12}
+              disabled={semitones >= 12 || harmonyMode}
               aria-label="Transpose up one semitone"
             >
               +
             </button>
             {semitones !== 0 && (
-              <button type="button" className="btn btn--ghost" onClick={() => onSemitonesChange(0)}>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => onSemitonesChange(0)}
+                disabled={harmonyMode}
+              >
                 Reset
               </button>
             )}
@@ -121,7 +129,11 @@ export default function Transport({
             step={1}
             value={semitones}
             onChange={(e) => onSemitonesChange(Number(e.target.value))}
+            disabled={harmonyMode}
           />
+          {harmonyMode && (
+            <small className="control__hint">Transposition is unavailable in harmony mode.</small>
+          )}
         </div>
 
         <div className="control">
@@ -157,6 +169,16 @@ export default function Transport({
             />
             <span>Roman numerals</span>
           </label>
+          {harmonyAvailable && (
+            <label className="toggle" title="Plays the song with a generated backing harmony mixed in. Builds on first use, which can take a minute on a long track.">
+              <input
+                type="checkbox"
+                checked={harmonyMode}
+                onChange={(e) => onHarmonyModeChange(e.target.checked)}
+              />
+              <span>Play with harmony</span>
+            </label>
+          )}
           <span className="transport__tempo">{tempo ? `${Math.round(tempo)} BPM` : ''}</span>
         </div>
       </div>

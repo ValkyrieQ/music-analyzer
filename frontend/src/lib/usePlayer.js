@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-export function usePlayer({ audioUrl, semitones }) {
+export function usePlayer({ audioUrl, semitones, harmonyUrl, harmonyMode }) {
   const audioRef = useRef(null)
   const rafRef = useRef(0)
   // Position we want to be at after a source swap. A ref (not state) because the
@@ -53,13 +53,21 @@ export function usePlayer({ audioUrl, semitones }) {
     audioRef.current = el
     el.preload = 'auto'
 
-    const src = semitones === 0 ? audioUrl : `${audioUrl}?semitones=${semitones}`
+    // Harmony playback is a different render (song + backing voices, no transposition
+    // support) rather than a variant of the transposed one, so the two are mutually
+    // exclusive on the same element: harmonyMode wins outright over semitones.
+    const useHarmony = harmonyMode && harmonyUrl
+    const src = useHarmony
+      ? harmonyUrl
+      : semitones === 0
+        ? audioUrl
+        : `${audioUrl}?semitones=${semitones}`
     // Guard against re-setting the same src: assigning `src` restarts loading even when
     // the value is unchanged, which would stutter playback on unrelated re-renders.
     if (el.dataset.src !== src) {
-      // A non-zero transposition is rendered on demand, so the first request for a new
-      // key can take a few seconds. Surface that instead of looking frozen.
-      if (semitones !== 0) setIsBuffering(true)
+      // A non-zero transposition, or the harmony render, happens on demand server-side
+      // and can take a while the first time. Surface that instead of looking frozen.
+      if (semitones !== 0 || useHarmony) setIsBuffering(true)
       el.dataset.src = src
       el.src = src
       el.load()
@@ -71,7 +79,7 @@ export function usePlayer({ audioUrl, semitones }) {
       setError(null)
 
       if (pendingSeekRef.current !== null) {
-        // Clamp: a transposed render can differ by a few milliseconds in length.
+        // Clamp: a transposed or harmony render can differ by a few milliseconds in length.
         el.currentTime = Math.min(pendingSeekRef.current, (el.duration || 0) - 0.05)
         pendingSeekRef.current = null
         if (wasPlayingRef.current) {
@@ -89,9 +97,11 @@ export function usePlayer({ audioUrl, semitones }) {
       setIsBuffering(false)
       setIsPlaying(false)
       setError(
-        semitones === 0
-          ? 'Could not load the audio for this track.'
-          : `Could not render the ${semitones > 0 ? '+' : ''}${semitones} semitone version.`,
+        useHarmony
+          ? 'Could not build the harmony for this track.'
+          : semitones === 0
+            ? 'Could not load the audio for this track.'
+            : `Could not render the ${semitones > 0 ? '+' : ''}${semitones} semitone version.`,
       )
     }
 
@@ -108,7 +118,7 @@ export function usePlayer({ audioUrl, semitones }) {
       el.removeEventListener('playing', onPlaying)
       el.removeEventListener('error', onError)
     }
-  }, [audioUrl, semitones])
+  }, [audioUrl, semitones, harmonyUrl, harmonyMode])
 
   // Before the source swaps, remember where we were so `onLoaded` can restore it.
   useEffect(() => {
@@ -117,7 +127,7 @@ export function usePlayer({ audioUrl, semitones }) {
       pendingSeekRef.current = el.currentTime
       wasPlayingRef.current = !el.paused
     }
-  }, [semitones])
+  }, [semitones, harmonyMode])
 
   // Release the element (and its network connection) when the track changes or unmounts.
   useEffect(

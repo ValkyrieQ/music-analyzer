@@ -5,10 +5,12 @@
  * no stems to offer and the menu would be an empty promise.
  *
  * The stem links are plain <a download> — the files already exist on disk, so the browser
- * can fetch them directly. Harmony is not: it renders on first request (pitch tracking the
- * vocal takes ~20s) and can legitimately fail on an instrumental track. Following a link
- * there would replace the page with raw JSON, so it goes through fetch and reports the
- * error in place.
+ * can fetch them directly. Harmony is not: it renders on first request, and on a real
+ * 3-4 minute song that has measured at up to 90 seconds (pitch-tracking the vocal, then
+ * shifting every note), which reads as broken next to instant stem downloads unless the
+ * wait is called out up front. It can also legitimately fail on an instrumental track.
+ * Following a link there would replace the page with raw JSON, so it goes through fetch
+ * and reports the error in place.
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -18,7 +20,18 @@ export default function StemMenu({ jobId, stems, harmonyAvailable, title }) {
   const [open, setOpen] = useState(false)
   const [harmonyState, setHarmonyState] = useState('idle') // idle | working | error
   const [harmonyError, setHarmonyError] = useState(null)
+  const [workingSeconds, setWorkingSeconds] = useState(0)
   const wrapperRef = useRef(null)
+
+  // A tick while rendering, not just a static "building…": the render can run past a
+  // minute on a real song, and a label that never changes is indistinguishable from one
+  // that is stuck. Reported to the user as "unresponsive" before this existed.
+  useEffect(() => {
+    if (harmonyState !== 'working') return undefined
+    setWorkingSeconds(0)
+    const id = setInterval(() => setWorkingSeconds((s) => s + 1), 1000)
+    return () => clearInterval(id)
+  }, [harmonyState])
 
   // Close on an outside click or Escape — a menu that can only be dismissed by its own
   // button feels stuck.
@@ -115,10 +128,13 @@ export default function StemMenu({ jobId, stems, harmonyAvailable, title }) {
                 <span>
                   Vocal harmony
                   <small className="stems__hint">
-                    lead + backing thirds, built from the chords
+                    lead + backing thirds, built from the chords — first build can take
+                    a minute or two on a long track
                   </small>
                 </span>
-                <small>{harmonyState === 'working' ? 'building…' : 'MP3'}</small>
+                <small>
+                  {harmonyState === 'working' ? `building… ${workingSeconds}s` : 'MP3'}
+                </small>
               </button>
               {harmonyError && <p className="stems__error">{harmonyError}</p>}
             </>

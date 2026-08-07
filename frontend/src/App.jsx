@@ -24,10 +24,15 @@ export default function App() {
   const [speed, setSpeed] = useState(1)
   const [autoScroll, setAutoScroll] = useState(true)
   const [showRomanNumerals, setShowRomanNumerals] = useState(false)
+  const [harmonyMode, setHarmonyMode] = useState(false)
+
+  const harmonyAvailable = analysis?.stems?.some((s) => s.name === 'vocals') ?? false
 
   const player = usePlayer({
     audioUrl: analysis ? api.audioUrl(analysis.id) : null,
     semitones,
+    harmonyUrl: analysis ? api.harmonyWithTrackUrl(analysis.id) : null,
+    harmonyMode,
   })
 
   useEffect(() => {
@@ -43,6 +48,7 @@ export default function App() {
       setError(null)
       setAnalysis(null)
       setSemitones(0)
+      setHarmonyMode(false)
       setPhase('working')
 
       try {
@@ -79,6 +85,7 @@ export default function App() {
     setJob(null)
     setError(null)
     setSemitones(0)
+    setHarmonyMode(false)
   }
 
   // Spelling follows the *transposed* key, so a chart moved to Eb shows flats even if the
@@ -109,10 +116,10 @@ export default function App() {
           player.seek(player.position + (event.shiftKey ? 10 : 3))
           break
         case '[':
-          setSemitones((s) => Math.max(-12, s - 1))
+          if (!harmonyMode) setSemitones((s) => Math.max(-12, s - 1))
           break
         case ']':
-          setSemitones((s) => Math.min(12, s + 1))
+          if (!harmonyMode) setSemitones((s) => Math.min(12, s + 1))
           break
         case 'Escape':
           player.stop()
@@ -123,7 +130,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [phase, player])
+  }, [phase, player, harmonyMode])
 
   return (
     <div className="app">
@@ -262,6 +269,9 @@ export default function App() {
               onAutoScrollChange={setAutoScroll}
               showRomanNumerals={showRomanNumerals}
               onShowRomanNumeralsChange={setShowRomanNumerals}
+              harmonyAvailable={harmonyAvailable}
+              harmonyMode={harmonyMode}
+              onHarmonyModeChange={setHarmonyMode}
             />
 
             <section className="panel panel--grid">

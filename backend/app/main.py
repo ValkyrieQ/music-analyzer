@@ -138,6 +138,7 @@ def _run_analysis(job: Job, source: ingest.AudioSource, use_demucs: bool) -> dic
         ],
         "timings": result.timings,
         "audio_url": f"/api/jobs/{job.id}/audio",
+        "harmony_with_track_url": f"/api/jobs/{job.id}/harmony/with-track",
     }
 
 
@@ -314,6 +315,7 @@ def job_stems(job_id: str) -> dict[str, Any]:
         # as that stem exists — not only once it has been generated.
         "harmony_available": (store.stem_dir(job_id) / "vocals.mp3").exists(),
         "harmony_url": f"/api/jobs/{job_id}/harmony",
+        "harmony_with_track_url": f"/api/jobs/{job_id}/harmony/with-track",
     }
 
 
@@ -353,25 +355,36 @@ def job_stem(job_id: str, stem: str) -> FileResponse:
     )
 
 
-@app.get("/api/jobs/{job_id}/harmony")
-def job_harmony(job_id: str) -> FileResponse:
-    """Lead vocal plus generated backing harmony, as MP3.
-
-    Rendered on first request and cached, rather than during analysis. Pitch tracking the
-    vocal costs ~17s on a 3-minute stem before any note is rendered, and adding that to
-    every job would work directly against making analysis faster — most users never ask
-    for the harmony. The cost lands only on whoever wants it, once.
-    """
-    job = store.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="job not found")
-
+def _require_vocals(job_id: str) -> Path:
     vocals = store.stem_dir(job_id) / "vocals.mp3"
     if not vocals.exists():
         raise HTTPException(
             status_code=404,
             detail="no vocal stem for this job — harmony needs a High accuracy analysis",
         )
+    return vocals
+
+
+def _safe_filename(title: str | None, job_id: str) -> str:
+    return "".join(
+        c if c.isalnum() or c in " -_" else "_" for c in (title or job_id)
+    ).strip() or "track"
+
+
+@app.get("/api/jobs/{job_id}/harmony")
+def job_harmony(job_id: str) -> FileResponse:
+    """Lead vocal plus generated backing harmony alone, as MP3 — for downloading.
+
+    Rendered on first request and cached, rather than during analysis. Pitch tracking the
+    vocal and rendering every note costs on the order of a minute on a real 3-4 minute
+    song (measured 87s on one), and adding that to every job would work directly against
+    making analysis faster — most users never ask for the harmony. The cost lands only on
+    whoever wants it, once.
+    """
+    job = store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    vocals = _require_vocals(job_id)
 
     cached = store.stem_dir(job_id) / "harmony.mp3"
     if not cached.exists():
@@ -393,14 +406,57 @@ def job_harmony(job_id: str) -> FileResponse:
             )
         cached = generated.path
 
-    safe = "".join(
-        c if c.isalnum() or c in " -_" else "_" for c in (job.title or job_id)
-    ).strip() or "track"
+    return FileResponse(
+        cached,
+        media_type="audio/mpeg",
+        filename=f"{_safe_filename(job.title, job_id)} - Harmony.mp3",
+        headers={"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/api/jobs/{job_id}/harmony/with-track")
+def job_harmony_with_track(job_id: str) -> FileResponse:
+    """The full song with the generated backing harmony mixed under it, as MP3.
+
+    This is what "listen with harmony" plays: the same audio as `/audio`, with only the
+    backing-voice bus added — the lead vocal already in the mix is not duplicated. Same
+    render-once-and-cache behaviour and cost as `/harmony`; a separate file because it is
+    a different mix, not a different quality of the same one.
+    """
+    job = store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    vocals = _require_vocals(job_id)
+
+    cached = store.stem_dir(job_id) / "harmony_with_track.mp3"
+    if not cached.exists():
+        result = store.load_result(job_id)
+        if result is None:
+            raise HTTPException(status_code=409, detail="analysis is not finished yet")
+
+        source = store.source_wav(job_id)
+        if not source.exists():
+            raise HTTPException(status_code=404, detail="audio not available for this job")
+
+        import librosa
+
+        vocal, sr = librosa.load(str(vocals), sr=None, mono=True)
+        full_mix, _ = librosa.load(str(source), sr=sr, mono=True)
+        generated = harmony.generate_with_track(
+            vocal, full_mix, sr, result.get("chords", []), store.stem_dir(job_id)
+        )
+        if generated is None:
+            raise HTTPException(
+                status_code=422,
+                detail="could not build a harmony — no sung notes were found in the "
+                       "vocal stem (an instrumental track, most likely)",
+            )
+        cached = generated.path
 
     return FileResponse(
         cached,
         media_type="audio/mpeg",
-        filename=f"{safe} - Harmony.mp3",
+        filename=f"{_safe_filename(job.title, job_id)} - with Harmony.mp3",
         headers={"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=3600"},
     )
 

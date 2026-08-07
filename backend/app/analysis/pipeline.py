@@ -266,7 +266,7 @@ def analyse(
 
     # --- rhythm ----------------------------------------------------------------------
     t0 = timed("tracking tempo and beats", 68)
-    rhythm_info = rhythm.analyse(stems.percussive, sr)
+    rhythm_info = rhythm.analyse(stems.percussive, sr, y_full=y)
     timings["rhythm"] = round(time.perf_counter() - t0, 2)
 
     # --- chroma ----------------------------------------------------------------------
@@ -319,8 +319,14 @@ def analyse(
     beat_chroma, beat_times, beat_loudness = _beat_sync_chroma(
         chroma, rhythm_info.beat_times, sr, CQT_HOP, rms=harmonic_rms,
     )
+    # Only steer the decoder toward the detected key when that detection itself is
+    # confident. A key guessed on thin evidence (an ambiguous or very short track) is as
+    # likely to be wrong as right, and biasing the chords toward a wrong key would make
+    # them worse, not better — the whole point of this bias is to add real information.
+    key_pitches = key.scale_pitches if key.confidence >= 0.3 else None
     beat_chords = chord_mod.recognise(
         beat_chroma, beat_times, duration, beat_loudness=beat_loudness,
+        key_pitches=key_pitches,
     )
     merged = chord_mod.merge_repeats(beat_chords)
     timings["chords"] = round(time.perf_counter() - t0, 2)

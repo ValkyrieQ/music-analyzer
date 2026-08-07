@@ -54,6 +54,17 @@ F0_HOP = 256
 # audible chirps between words.
 VOICED_MIN_PROB = 0.5
 
+# Gaps in the confident-voicing mask up to this long are bridged over rather than treated
+# as a break between notes. Measured on real vocal: pyin's voicing probability oscillates
+# above and below VOICED_MIN_PROB *during a single sustained note* — vibrato and normal
+# pitch wobble repeatedly drag it under 0.5 for a couple of frames at a time, even though a
+# listener hears one continuous note. Without bridging, that single note was cut into 5-6
+# fragments (measured: 656 raw confident runs on one vocal collapse to 123 once gaps up to
+# 150ms are bridged), each rendered as its own independent pitch_shift call with its own
+# fade. The result is not "wrong notes", it is the same note stuttering and re-attacking
+# every 100-150ms — which is exactly what "ฟังไม่รู้เรื่อง" (unintelligible) sounds like.
+MAX_GAP_SECONDS = 0.15
+
 # Shortest note worth harmonising, in seconds. Below this a shifted fragment is a click.
 MIN_NOTE_SECONDS = 0.08
 
@@ -88,11 +99,55 @@ class HarmonyResult:
     seconds: float           # total harmonised duration
 
 
+@dataclass
+class HarmonyBus:
+    """The backing-voice signal alone, before it is mixed into anything.
+
+    Kept separate from the final mixdown because there are two legitimate things to mix
+    it into: the isolated vocal (for the standalone download) and the full song (so
+    playback can be "the track, plus harmony" rather than "just the a cappella vocal").
+    Rendering the bus is the slow part (pitch tracking + per-note shifting); building
+    either mixdown from it afterwards is nearly free, so both can be produced without
+    tracking the vocal's pitch twice.
+    """
+
+    audio: np.ndarray
+    voices: list[int]
+    notes: int
+    seconds: float
+
+
 def _hann_fade(n: int) -> np.ndarray:
     """Half a raised cosine, for fading a rendered note in or out."""
     if n <= 0:
         return np.ones(0, dtype=np.float32)
     return (0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, n))).astype(np.float32)
+
+
+def _bridge_gaps(confident: np.ndarray, max_gap_frames: int) -> np.ndarray:
+    """Fill short False runs that are flanked by True on both sides.
+
+    A gap at the very start or end of the signal is left alone — there is nothing to
+    interpolate between, only a trailing edge to guess at, which is exactly the kind of
+    guess that produces the tracking errors this function exists to avoid.
+    """
+    if max_gap_frames <= 0:
+        return confident
+
+    bridged = confident.copy()
+    n = bridged.size
+    i = 0
+    while i < n:
+        if bridged[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and not bridged[j]:
+            j += 1
+        if i > 0 and j < n and (j - i) <= max_gap_frames:
+            bridged[i:j] = True
+        i = j
+    return bridged
 
 
 def _detect_notes(vocal: np.ndarray, sr: int) -> list[Note]:
@@ -112,8 +167,20 @@ def _detect_notes(vocal: np.ndarray, sr: int) -> list[Note]:
     if not confident.any():
         return []
 
+    confident = _bridge_gaps(confident, int(MAX_GAP_SECONDS * sr / F0_HOP))
+
+    # f0 is NaN across a bridged gap (pyin had nothing confident to report there), so
+    # interpolate through it linearly in log-frequency — a gap is short by construction
+    # (<= MAX_GAP_SECONDS) and mid-note, so the true pitch barely moved; holding it flat
+    # or leaving NaN would either introduce a fake portamento or break the median below.
     midi = np.full(f0.shape, np.nan)
-    midi[confident] = librosa.hz_to_midi(f0[confident])
+    voiced_now = voiced & np.isfinite(f0)
+    midi[voiced_now] = librosa.hz_to_midi(f0[voiced_now])
+    gap_only = confident & ~voiced_now
+    if gap_only.any() and voiced_now.any():
+        known_idx = np.flatnonzero(voiced_now)
+        gap_idx = np.flatnonzero(gap_only)
+        midi[gap_idx] = np.interp(gap_idx, known_idx, midi[known_idx])
 
     notes: list[Note] = []
     min_frames = max(2, int(MIN_NOTE_SECONDS * sr / F0_HOP))
@@ -239,21 +306,17 @@ def _render_voice(
     return out, rendered
 
 
-def generate(
+def build_bus(
     vocal: np.ndarray,
     sr: int,
     chords: list[dict],
-    out_dir: Path,
     voices: tuple[tuple[int, float], ...] = DEFAULT_VOICES,
-    bitrate: str = "192k",
-) -> HarmonyResult | None:
-    """Build a lead + harmony mixdown from the vocal stem.
+) -> HarmonyBus | None:
+    """Render the backing-voice signal alone — the slow, pitch-tracking part.
 
     Returns None when there is nothing to harmonise — an instrumental track, or a stem
     whose pitch could not be tracked. Callers should treat that as normal.
     """
-    import soundfile as sf
-
     vocal = np.asarray(vocal, dtype=np.float32)
     if vocal.ndim == 2:
         vocal = vocal.mean(axis=0)
@@ -286,17 +349,23 @@ def generate(
         log.info("skipping harmony: no note could be mapped onto a detected chord")
         return None
 
-    mix = vocal * LEAD_GAIN + bus * HARMONY_BUS_GAIN
+    seconds = sum(n.end - n.start for n in notes) / sr
+    log.info("harmony bus rendered: voices=%s notes=%d (%.1fs of vocal)", used, total_notes, seconds)
+    return HarmonyBus(audio=bus, voices=used, notes=total_notes, seconds=round(seconds, 1))
+
+
+def _encode(mix: np.ndarray, sr: int, out_path: Path, bitrate: str = "192k") -> bool:
+    """Peak-guard and encode a mixdown to MP3 at `out_path`. Returns success."""
+    import soundfile as sf
 
     # Only attenuate if we actually clipped; scaling unconditionally would quietly make
-    # the harmony mix softer than the vocal stem it came from.
+    # the mix softer than its inputs.
     peak = float(np.max(np.abs(mix))) if mix.size else 0.0
     if peak > 0.99:
         mix = mix * (0.99 / peak)
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    wav_path = out_dir / "harmony.wav"
-    mp3_path = out_dir / "harmony.mp3"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wav_path = out_path.with_suffix(".wav")
 
     try:
         sf.write(wav_path, mix, sr, subtype="PCM_16")
@@ -305,24 +374,76 @@ def generate(
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                 "-i", str(wav_path),
                 "-c:a", "libmp3lame", "-b:a", bitrate,
-                str(mp3_path),
+                str(out_path),
             ],
             capture_output=True, text=True, timeout=600,
         )
-        if result.returncode != 0 or not mp3_path.exists():
-            log.warning("harmony encode failed: %s", result.stderr[:200])
-            return None
+        if result.returncode != 0 or not out_path.exists():
+            log.warning("mix encode failed: %s", result.stderr[:200])
+            return False
+        return True
     except Exception as exc:  # noqa: BLE001 - harmony is a bonus, never a job failure
-        log.warning("harmony generation failed: %s", exc)
-        return None
+        log.warning("mix encode failed: %s", exc)
+        return False
     finally:
         wav_path.unlink(missing_ok=True)
 
-    seconds = sum(n.end - n.start for n in notes) / sr
-    log.info(
-        "harmony generated: voices=%s notes=%d (%.1fs of vocal)",
-        used, total_notes, seconds,
-    )
-    return HarmonyResult(
-        path=mp3_path, voices=used, notes=total_notes, seconds=round(seconds, 1)
-    )
+
+def generate(
+    vocal: np.ndarray,
+    sr: int,
+    chords: list[dict],
+    out_dir: Path,
+    voices: tuple[tuple[int, float], ...] = DEFAULT_VOICES,
+    bitrate: str = "192k",
+) -> HarmonyResult | None:
+    """Build a lead + harmony mixdown from the vocal stem alone (the standalone download)."""
+    vocal = np.asarray(vocal, dtype=np.float32)
+    if vocal.ndim == 2:
+        vocal = vocal.mean(axis=0)
+
+    bus = build_bus(vocal, sr, chords, voices=voices)
+    if bus is None:
+        return None
+
+    mix = vocal * LEAD_GAIN + bus.audio * HARMONY_BUS_GAIN
+    mp3_path = out_dir / "harmony.mp3"
+    if not _encode(mix, sr, mp3_path, bitrate=bitrate):
+        return None
+
+    return HarmonyResult(path=mp3_path, voices=bus.voices, notes=bus.notes, seconds=bus.seconds)
+
+
+def generate_with_track(
+    vocal: np.ndarray,
+    full_mix: np.ndarray,
+    sr: int,
+    chords: list[dict],
+    out_dir: Path,
+    voices: tuple[tuple[int, float], ...] = DEFAULT_VOICES,
+    bitrate: str = "192k",
+) -> HarmonyResult | None:
+    """Build the *whole song* plus the harmony bus, for "listen with harmony" playback.
+
+    Unlike `generate`, the lead vocal is not re-added on top — it is already present in
+    `full_mix` (this is the same audio the player normally streams). Adding it again would
+    double the vocal and drown the instruments; only the backing-voice bus is new here.
+    """
+    vocal = np.asarray(vocal, dtype=np.float32)
+    if vocal.ndim == 2:
+        vocal = vocal.mean(axis=0)
+    full_mix = np.asarray(full_mix, dtype=np.float32)
+    if full_mix.ndim == 2:
+        full_mix = full_mix.mean(axis=0)
+
+    bus = build_bus(vocal, sr, chords, voices=voices)
+    if bus is None:
+        return None
+
+    n = min(full_mix.size, bus.audio.size)
+    mix = full_mix[:n] + bus.audio[:n] * HARMONY_BUS_GAIN
+    mp3_path = out_dir / "harmony_with_track.mp3"
+    if not _encode(mix, sr, mp3_path, bitrate=bitrate):
+        return None
+
+    return HarmonyResult(path=mp3_path, voices=bus.voices, notes=bus.notes, seconds=bus.seconds)

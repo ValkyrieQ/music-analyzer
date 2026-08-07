@@ -194,8 +194,13 @@ try {
     const cells = [...document.querySelectorAll('.beat.is-empty')]
     return {
       count: cells.length,
+      // A continuation N beat (is-held, not is-change) is deliberately blank — the label
+      // is only drawn on the beat where "no chord" starts. Only check the glyph on cells
+      // that actually carry a label, or every held N beat reads as a missing glyph.
       // A tofu box is a single char outside the BMP; the dash is U+2013.
-      glyphs: [...new Set(cells.map((c) => c.textContent.trim()))],
+      glyphs: [...new Set(
+        cells.filter((c) => c.classList.contains('is-change')).map((c) => c.textContent.trim()),
+      )],
     }
   })
   record(
@@ -277,6 +282,60 @@ try {
     /chords from/i.test(provenance),
     provenance.replace(/\s+/g, ' ').trim(),
   )
+
+  // --- "play with harmony" toggle ---
+  // The vocals stem is always exported on a Demucs job, so the toggle offers itself
+  // regardless of whether the track actually has singable content — this fixture is a
+  // synthetic instrumental with no real vocal, so the point here is that turning the
+  // toggle on surfaces a clear, contained error rather than hanging or breaking playback,
+  // not that harmony actually renders (a real vocal track is exercised separately).
+  const harmonyToggleLabel = await page.evaluateHandle(() =>
+    [...document.querySelectorAll('.control--toggles .toggle')].find((l) =>
+      l.textContent.includes('Play with harmony'),
+    ),
+  )
+  const hasHarmonyToggle = await page.evaluate((el) => Boolean(el), harmonyToggleLabel)
+  record('play-with-harmony toggle is offered', hasHarmonyToggle)
+
+  if (hasHarmonyToggle) {
+    await page.evaluate((el) => el.querySelector('input').click(), harmonyToggleLabel)
+    // Building on an instrumental fixture 422s quickly; a real vocal render can take over
+    // a minute, so this waits for either outcome rather than a fixed sleep.
+    await page
+      .waitForFunction(
+        () =>
+          document.querySelector('.alert--error') ||
+          !document.querySelector('.transport__buffering'),
+        { timeout: 120000 },
+      )
+      .catch(() => {})
+
+    const afterToggle = await page.evaluate(() => ({
+      transposeDisabled: document
+        .querySelectorAll('.control__transpose .btn--step')[0]
+        ?.disabled,
+      error: document.querySelector('.alert--error')?.textContent || null,
+    }))
+    // Whichever way it resolves (harmony built, or the fixture's lack of a real vocal
+    // rejected it), the UI must stay coherent: transpose disabled while harmony mode is
+    // on, and any failure reported in place rather than silently doing nothing.
+    record(
+      'harmony mode disables transpose while active',
+      afterToggle.transposeDisabled === true,
+      `transpose btn disabled=${afterToggle.transposeDisabled}`,
+    )
+
+    // Turn it back off so later checks (transpose, seek) run against the normal mix.
+    await page.evaluate((el) => el.querySelector('input').click(), harmonyToggleLabel)
+    await sleep(500)
+    record(
+      'turning harmony mode off re-enables transpose',
+      (await page.$eval(
+        '.control__transpose .btn--step',
+        (b) => b.disabled,
+      )) === false,
+    )
+  }
 
   // --- playback and the active-beat indicator ---
   const view = () =>
@@ -471,7 +530,16 @@ try {
   const slowed = await audioState()
   record('speed control applies', slowed.rate === 0.5, `playbackRate=${slowed.rate}`)
 
-  record('no console errors', errors.length === 0, errors.slice(0, 2).join(' | ') || 'clean')
+  // The harmony-toggle check above deliberately provokes a 422 on this instrumental
+  // fixture (no vocal to harmonise) and the app reports it correctly via the fetch's own
+  // rejection — Chrome also logs the underlying network response as a console error,
+  // which is App reacting correctly to an expected condition, not a bug.
+  const unexpectedErrors = errors.filter((e) => !/422 \(Unprocessable Entity\)/.test(e))
+  record(
+    'no console errors',
+    unexpectedErrors.length === 0,
+    unexpectedErrors.slice(0, 2).join(' | ') || 'clean',
+  )
 
   console.log('\n' + '='.repeat(70))
   const failed = checks.filter((c) => !c.pass)

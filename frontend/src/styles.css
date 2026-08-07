@@ -758,6 +758,13 @@ body {
   gap: 8px;
 }
 
+.control__hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 .control__keyreadout {
   display: flex;
   flex-direction: column;

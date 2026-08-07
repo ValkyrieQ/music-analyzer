@@ -64,6 +64,10 @@ export function harmonyUrl(jobId) {
   return `${BASE}/jobs/${jobId}/harmony`
 }
 
+export function harmonyWithTrackUrl(jobId) {
+  return `${BASE}/jobs/${jobId}/harmony/with-track`
+}
+
 /**
  * Fetch the harmony render, reporting a real error message rather than navigating.
  *

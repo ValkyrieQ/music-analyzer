@@ -120,14 +120,35 @@ def _estimate_meter(onset_env: np.ndarray, beat_frames: np.ndarray) -> tuple[int
     return best[0], best[1]
 
 
-def analyse(y_percussive: np.ndarray, sr: int) -> RhythmInfo:
+def analyse(y_percussive: np.ndarray, sr: int, y_full: np.ndarray | None = None) -> RhythmInfo:
     """Track tempo and beats from the percussive component of a mix.
 
     Args:
         y_percussive: mono signal — ideally drums-only or HPSS-percussive, which makes
             the onset envelope far cleaner than the full mix.
+        y_full: the complete mix, used to fill in wherever the percussive stem has
+            nothing to track. A drums-only stem is literally silent through an intro or
+            a quiet verse with no kit, and onset_strength on silence is zero everywhere
+            — not "uncertain", *zero* — so beat_track has nothing to lock onto and the
+            whole beat grid (and everything downstream: bars, chords, downbeats) starts
+            wherever the drums finally come in, potentially minutes into the track.
     """
-    onset_env = librosa.onset.onset_strength(y=y_percussive, sr=sr, aggregate=np.median)
+    onset_perc = librosa.onset.onset_strength(y=y_percussive, sr=sr, aggregate=np.median)
+    onset_env = onset_perc
+
+    if y_full is not None:
+        onset_full = librosa.onset.onset_strength(y=y_full, sr=sr, aggregate=np.median)
+        n = min(onset_perc.size, onset_full.size)
+        onset_perc, onset_full = onset_perc[:n], onset_full[:n]
+        # Each envelope is scaled by its own peak before combining, not by a shared
+        # scale — the percussive envelope is usually much quieter than the full mix, and
+        # comparing raw magnitudes would let the full mix dominate everywhere, defeating
+        # the point of separating drums out in the first place. Taking the max keeps the
+        # cleaner percussive signal wherever it has anything to say, and only falls back
+        # to the full mix where percussive is silent.
+        perc_peak = float(onset_perc.max()) or 1.0
+        full_peak = float(onset_full.max()) or 1.0
+        onset_env = np.maximum(onset_perc / perc_peak, onset_full / full_peak)
 
     tempo_arr, beat_frames = librosa.beat.beat_track(
         onset_envelope=onset_env,
@@ -147,8 +168,17 @@ def analyse(y_percussive: np.ndarray, sr: int) -> RhythmInfo:
         beat_times = np.arange(0.0, duration, 60.0 / tempo)
         beat_frames = librosa.time_to_frames(beat_times, sr=sr)
 
-    # Correct an octave-low lock before anything downstream depends on the grid.
-    beat_times = _fix_tempo_octave(onset_env, beat_times, sr)
+    # Correct an octave-low lock before anything downstream depends on the grid. This has
+    # to run against the percussive-only envelope, not the blended one: its 0.33 threshold
+    # was calibrated against how much a *drum* pattern's off-beat midpoints leak (~0%) versus
+    # a genuinely half-rate grid (~50%). Full-mix onset strength is continuous — sustained
+    # harmony and vocal consonants land energy on the midpoints too — which pushed the ratio
+    # over threshold on a track that was already tracked correctly, and it drove the reported
+    # tempo to exactly double the true 117 BPM by falsely "fixing" a half-rate reading that
+    # was not there. Measured on that track: the blended envelope reads the octave check at
+    # 0.117/0.344 ≈ 0.34 (just over the line); the percussive-only envelope it should be using
+    # would have read far below it.
+    beat_times = _fix_tempo_octave(onset_perc, beat_times, sr)
     beat_frames = librosa.time_to_frames(beat_times, sr=sr)
 
     beats_per_bar, phase = _estimate_meter(onset_env, np.asarray(beat_frames))

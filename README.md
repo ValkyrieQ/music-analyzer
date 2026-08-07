@@ -141,15 +141,18 @@ Job artefacts are pruned after 12 hours.
 | `GET` | `/api/jobs/{id}/audio?semitones=N` | Audio, pitch-shifted if `N ≠ 0` |
 | `GET` | `/api/jobs/{id}/stems` | Which stems exist, and whether harmony can be built |
 | `GET` | `/api/jobs/{id}/stems/{stem}` | One separated stem as MP3 |
-| `GET` | `/api/jobs/{id}/harmony` | Generated vocal harmony as MP3; 422 on an instrumental |
+| `GET` | `/api/jobs/{id}/harmony` | Lead vocal + backing harmony alone, as MP3; 422 on an instrumental |
+| `GET` | `/api/jobs/{id}/harmony/with-track` | The whole song with the harmony mixed in, for "Play with harmony" |
 | `DELETE` | `/api/jobs/{id}` | Delete a job and its files |
 
 Analysis is asynchronous: `POST` returns immediately with a job id, and the client polls
 `GET /api/jobs/{id}` once a second for a stage name and percentage.
 
-Harmony is the one endpoint that does real work on request rather than during analysis: pitch
-tracking the vocal costs ~8s, and adding that to every job would work against making analysis
-fast. It renders on the first call and is cached afterwards.
+Both harmony endpoints do real work on the first request rather than during analysis: pitch
+tracking the vocal and rendering every note has measured up to ~90s on a real 3-4 minute song,
+and adding that to every job would work against making analysis fast. Each renders once and is
+cached afterwards — the two are independent renders of the same underlying harmony bus, so
+downloading the vocal-only mix does not also render the full-track one, and vice versa.
 
 ---
 
@@ -163,6 +166,11 @@ where each note is snapped to a pitch class that is actually in the chord soundi
 fixed interval would be wrong about half the time. Shifting happens per *note*, not per frame —
 per-frame chases vibrato and tracker jitter and warbles. Instrumental tracks are detected and
 reported rather than processed.
+
+The Transport bar's **Play with harmony** toggle plays the harmony mixed under the full song
+instead of just the isolated vocal — it swaps the player's audio source rather than downloading
+anything. Transposition is unavailable while it is on, since the harmony render does not support
+a pitch-shifted variant.
 
 ---
 
