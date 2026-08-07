@@ -1,0 +1,25 @@
+# --- Web layer ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.4
+
+# --- Ingest ---
+# Deliberately unpinned, unlike everything else here. YouTube changes its player and
+# signature scheme continuously, and a pinned yt-dlp stops working within months: the
+# 2025.1.26 pin this replaced failed every real URL with "Signature extraction failed /
+# Requested format is not available" while the current release downloaded the same video
+# fine. A stale ingest is a broken feature, so track the release stream and rebuild when
+# downloads start failing.
+yt-dlp
+
+# --- DSP / MIR ---
+numpy==1.26.4
+scipy==1.14.1
+librosa==0.11.0
+soundfile==0.12.1
+soxr==0.5.0.post1
+
+# --- Source separation (Demucs) ---
+# torch is installed separately in the Dockerfile (CPU wheel index)
+demucs==4.0.1

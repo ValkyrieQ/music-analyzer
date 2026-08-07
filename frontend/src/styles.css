@@ -1,0 +1,1062 @@
+/* ==========================================================================
+   Music Analyzer — dark, high-contrast interface.
+
+   Dark by default because the chord sheet is meant to be read while playing, often
+   next to a lit screen or on a dim stage. Colour carries meaning here: one accent for
+   "now", a muted treatment for "already played", and a distinct hue for chords outside
+   the key. Everything else stays neutral so the chart is the only thing competing for
+   attention.
+   ========================================================================== */
+
+:root {
+  --bg: #0b0d12;
+  --bg-raised: #12151d;
+  --bg-sunken: #080a0e;
+  --border: #232834;
+  --border-strong: #2f3644;
+  /* Bar-lines are lighter than the cell borders, not darker: on a dark ground a dark rule
+     reads as a gap between cells rather than as a line drawn between measures. */
+  --barline: #6a7488;
+
+  --text: #e8ebf2;
+  --text-dim: #9aa3b5;
+  --text-faint: #626b7d;
+
+  /* Accent: the "now playing" colour, used for the playhead and active beat. */
+  --accent: #4ade80;
+  --accent-dim: #16a34a;
+  --accent-glow: rgba(74, 222, 128, 0.25);
+
+  /* Chords outside the detected key — worth noticing, not an error. */
+  --chromatic: #c084fc;
+  --root-block: #60a5fa;
+  --upper-block: #3b6fa8;
+
+  --danger: #f87171;
+  --warn: #fbbf24;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- header ------------------------------------------------------------- */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.header__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--accent);
+}
+
+.header__brand h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* --- panels ------------------------------------------------------------- */
+.panel {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.panel--intro {
+  max-width: 680px;
+  margin: 6vh auto 0;
+  text-align: center;
+}
+
+.panel--intro h2 {
+  margin: 0 0 8px;
+  font-size: 26px;
+  letter-spacing: -0.02em;
+}
+
+.panel__lead {
+  margin: 0 0 24px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  font-size: 15px;
+}
+
+.panel__heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.panel__heading small {
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-faint);
+}
+
+/* --- source picker ------------------------------------------------------ */
+.source {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 34px 20px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.dropzone:hover,
+.dropzone:focus-visible {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  outline: none;
+}
+
+.dropzone.is-dragging {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+  color: var(--accent);
+}
+
+.dropzone__title {
+  margin: 4px 0 0;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.dropzone__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* A chosen file reads as settled — solid border, accent tint — so it is obvious that the
+   next step is the Analyze button and not another drop. */
+.dropzone.has-file {
+  border-style: solid;
+  border-color: var(--accent-dim);
+  background: rgba(74, 222, 128, 0.05);
+  color: var(--accent);
+}
+
+.dropzone__file {
+  word-break: break-all;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.dropzone__clear {
+  margin-top: 6px;
+}
+
+/* Full-width and unmissable: analysis is the one action on this screen, and with stem
+   separation it commits the user to minutes of waiting. */
+.btn--analyze {
+  justify-content: center;
+  padding: 13px 20px;
+  font-size: 15px;
+}
+
+.source__ready {
+  margin: -6px 0 0;
+  font-size: 12px;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+.urlbar input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.source__divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.source__divider::before,
+.source__divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.urlbar {
+  display: flex;
+  gap: 8px;
+}
+
+.urlbar input {
+  flex: 1;
+  padding: 11px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+}
+
+.urlbar input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+.urlbar input::placeholder {
+  color: var(--text-faint);
+}
+
+/* --- buttons ------------------------------------------------------------ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 9px 14px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.06s;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06240f;
+  font-weight: 600;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: #6ee79a;
+  border-color: #6ee79a;
+  color: #06240f;
+}
+
+.btn--play {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.btn--icon {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.btn--step {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.btn--chip {
+  padding: 5px 9px;
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+.btn--chip.is-active {
+  background: var(--accent-glow);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* --- toggles ------------------------------------------------------------ */
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+.toggle--quality {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  text-align: left;
+  line-height: 1.5;
+}
+
+.toggle--quality strong {
+  color: var(--text);
+}
+
+/* --- alerts / progress -------------------------------------------------- */
+.alert {
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 14px;
+  text-align: left;
+}
+
+.alert--error {
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  color: #fca5a5;
+}
+
+.alert--warn {
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  color: var(--warn);
+  margin: 14px 0 0;
+}
+
+.panel--working {
+  text-align: center;
+  max-width: 520px;
+  margin: 10vh auto 0;
+}
+
+.panel--working h2 {
+  margin: 14px 0 4px;
+  font-size: 19px;
+}
+
+.working__stage {
+  margin: 0 0 16px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.working__hint {
+  margin: 14px 0 0;
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+
+.progress {
+  height: 6px;
+  background: var(--bg-sunken);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress__bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.spinner {
+  width: 34px;
+  height: 34px;
+  margin: 0 auto;
+  border: 3px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- summary / stats ---------------------------------------------------- */
+.summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.summary__title h2 {
+  margin: 0 0 3px;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.summary__source {
+  display: block;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* --- stem download menu ------------------------------------------------- */
+.stems {
+  position: relative;
+  margin-top: 10px;
+}
+
+.stems__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.stems__count {
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--bg-sunken);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Anchored to the trigger and above the transport bar: the menu is transient, so it
+   overlays rather than pushing the page around when it opens. */
+.stems__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 244px;
+  padding: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 45%);
+}
+
+.stems__heading {
+  margin: 6px 8px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+
+.stems__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 9px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.stems__item:hover,
+.stems__item:focus-visible {
+  background: var(--bg-sunken);
+}
+
+.stems__item[disabled] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.stems__item small {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stems__item--action span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stems__hint {
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+}
+
+.stems__error {
+  margin: 4px 8px 6px;
+  font-size: 12px;
+  color: var(--danger);
+  line-height: 1.4;
+}
+
+.stats {
+  display: flex;
+  gap: 26px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.stat__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+}
+
+.stat__value {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.15;
+}
+
+.stat__value--key {
+  font-size: 17px;
+}
+
+.stat__unit {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* --- transport ---------------------------------------------------------- */
+.transport {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  position: sticky;
+  top: 58px;
+  z-index: 15;
+}
+
+.transport__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.transport__row--controls {
+  gap: 26px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.transport__time {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  min-width: 92px;
+}
+
+.transport__time strong {
+  color: var(--text);
+}
+
+.transport__buffering {
+  font-size: 11px;
+  color: var(--warn);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.transport__tempo {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+/* Range inputs: the seek bar shows filled progress, so the thumb position reads
+   correctly at a glance even while it is being dragged. */
+.transport__seek,
+.control__slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border-strong);
+  cursor: pointer;
+}
+
+.transport__seek {
+  background: linear-gradient(
+    to right,
+    var(--accent) 0%,
+    var(--accent) var(--progress, 0%),
+    var(--border-strong) var(--progress, 0%),
+    var(--border-strong) 100%
+  );
+}
+
+.transport__seek::-webkit-slider-thumb,
+.control__slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-raised);
+  cursor: pointer;
+}
+
+.transport__seek::-moz-range-thumb,
+.control__slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--bg-raised);
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+/* --- controls ----------------------------------------------------------- */
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.control--toggles {
+  gap: 8px;
+  margin-left: auto;
+  flex-direction: row;
+  align-items: center;
+}
+
+.control__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+}
+
+.control__transpose {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.control__keyreadout {
+  display: flex;
+  flex-direction: column;
+  min-width: 108px;
+  text-align: center;
+}
+
+.control__keyreadout strong {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--accent);
+}
+
+.control__keyreadout small {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.control__slider {
+  width: 190px;
+  flex: none;
+}
+
+.control__speeds {
+  display: flex;
+  gap: 5px;
+}
+
+/* --- chord grid ---------------------------------------------------------
+   Modelled on a printed chord chart (and on chordify's "chord overview"): one cell per
+   beat, cells butted together with no gaps, and a heavy rule where each bar begins. The
+   bar-line is what makes the grid readable — light borders alone read as a spreadsheet.
+
+   A chord name appears only on the beat where it changes; continuation cells are blank, so
+   the eye picks up the harmonic rhythm from the pattern of labels rather than by comparing
+   repeated text.
+   -------------------------------------------------------------------- */
+.grid {
+  max-height: 62vh;
+  overflow-y: auto;
+  /* No `scroll-behavior: smooth` here: the auto-scroll passes `behavior: 'smooth'`
+     explicitly, and having it on the element as well makes a user's own drag lag. */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+
+.grid__empty {
+  color: var(--text-faint);
+  font-size: 13px;
+  text-align: center;
+  padding: 26px;
+}
+
+/* Auto-fill rather than flex-wrap: whole bars per row, stretched to the full width. Wrapping
+   fixed-width bars leaves a ragged gap at the right of every row, which reads as a rendering
+   fault on a grid that is meant to look ruled. */
+.grid__bars {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-content: flex-start;
+  padding: 10px;
+  gap: 6px 0; /* row gap only — bars must touch horizontally to read as one grid */
+}
+
+.bar {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  /* The bar-line. Heavier *and lighter* than the cell borders by design: it is the only cue
+     separating one measure from the next now that cells are contiguous, and on a dark
+     background a darker rule would read as a gap rather than a line. */
+  border-left: 4px solid var(--barline);
+  transition: border-color 0.15s;
+}
+
+.bar.is-active {
+  border-left-color: var(--accent);
+}
+
+/* Bar numbers are orientation, not content — small, above the grid, out of the reading path. */
+.bar__number {
+  position: absolute;
+  left: 5px;
+  top: -1px;
+  font-family: var(--mono);
+  font-size: 8px;
+  line-height: 1;
+  color: var(--text-faint);
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+/* Equal columns so every beat in a bar is the same width regardless of how wide the bar
+   ended up — an uneven beat grid makes the rhythm look uneven. */
+.bar__beats {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  flex: 1;
+  min-width: 0;
+}
+
+.beat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  min-height: 62px;
+  overflow: hidden;
+  padding: 8px 6px 8px 9px;
+  border: 1px solid var(--border);
+  border-left: none; /* shared edges: one line between neighbours, not two */
+  background: var(--bg-raised);
+  color: var(--text);
+  font-family: var(--font);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+
+.beat:hover {
+  background: #1a1f29;
+}
+
+/* The active beat is the single most important thing on screen while playing, so it is a
+   solid block rather than a tinted cell — findable in peripheral vision. */
+.beat.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06240f;
+  z-index: 1;
+}
+
+.beat.is-active .beat__label,
+.beat.is-active .beat__dash {
+  color: #06240f;
+}
+
+/* An active continuation cell still has to show *what* is sounding, so it borrows the
+   label of the chord it belongs to via the data attribute set on the bar's cells. */
+.beat.is-held.is-active::before {
+  content: attr(data-held);
+  font-family: var(--mono);
+  font-size: 21px;
+  font-weight: 700;
+  opacity: 0.5;
+}
+
+/* Played beats recede rather than disappear: useful for orientation, not for reading. */
+.beat.is-past:not(.is-active) {
+  opacity: 0.5;
+}
+
+.beat.is-empty {
+  background: var(--bg-sunken);
+  color: var(--text-faint);
+}
+
+/* A dotted underline marks low-confidence detections — an honest signal that the
+   algorithm was unsure, rather than presenting every chord as equally certain. */
+.beat.is-unsure .beat__label {
+  border-bottom: 1.5px dotted var(--warn);
+  padding-bottom: 1px;
+}
+
+.beat__label {
+  display: inline-flex;
+  align-items: flex-start;
+  line-height: 1.05;
+}
+
+.beat__root {
+  font-family: var(--mono);
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.05;
+}
+
+/* Chord quality set as a superscript, as on a lead sheet: "Em7" reads as one symbol
+   rather than three characters of equal weight. */
+.beat__suffix {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  margin-top: 1px;
+  opacity: 0.9;
+}
+
+.beat__numeral {
+  font-size: 10px;
+  opacity: 0.65;
+  font-style: italic;
+  margin-top: 2px;
+}
+
+/* "No chord" mark. An en dash in the UI font, not a musical-rest codepoint: U+1D13D is
+   absent from every common interface font, so it fell back to a tofu box that looked like a
+   bug. Kept dim and small — it means "nothing to play here", so it must not compete with a
+   real chord for attention. */
+.beat__dash {
+  font-family: var(--mono);
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0.4;
+}
+
+@media (max-width: 720px) {
+  .beat {
+    min-width: 58px;
+    min-height: 52px;
+  }
+
+  .beat__root {
+    font-size: 18px;
+  }
+}
+
+/* --- footer ------------------------------------------------------------- */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.footer__keys {
+  font-family: var(--mono);
+}
+
+/* --- responsive --------------------------------------------------------- */
+@media (max-width: 780px) {
+  .main {
+    padding: 14px;
+  }
+
+  .summary {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .stats {
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+
+  .transport {
+    position: static;
+  }
+
+  .transport__row--controls {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .control--toggles {
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+
+  .control__slider {
+    width: 100%;
+  }
+
+  .beat {
+    min-width: 46px;
+    min-height: 46px;
+  }
+}
+
+/* Respect a user's reduced-motion preference: kill the decorative animation and the
+   auto-scroll easing, but keep the playhead (it conveys information, not decoration). */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2s;
+  }
+
+  .grid {
+    scroll-behavior: auto;
+  }
+
+  .beat,
+  .bar,
+  .btn {
+    transition: none;
+  }
+
+  .beat.is-active {
+    transform: none;
+  }
+}

@@ -1,0 +1,77 @@
+# Music Analyzer — two services, one network.
+#
+#   web  : nginx serving the built SPA, and reverse-proxying /api to the backend.
+#   api  : FastAPI + ffmpeg + Demucs doing the analysis.
+#
+# Only `web` publishes a port. The API is reachable from the browser through the proxy,
+# which keeps a single origin and means the backend never needs CORS in production.
+#
+#   docker compose up -d --build     start
+#   docker compose logs -f api       follow analysis logs
+#   docker compose down              stop
+
+name: music-analyzer
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: music-analyzer-api:latest
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /data
+      LOG_DIR: /app/log
+      # Demucs source separation. Turning this off makes analysis ~20x faster and
+      # noticeably less accurate on dense mixes.
+      ENABLE_DEMUCS: "1"
+      # htdemucs_6s adds dedicated guitar and piano stems for the same wall-clock as the
+      # 4-stem htdemucs (both are a single pass; the extras are just output channels).
+      # Chord analysis reads piano first, then guitar, so this is what makes it accurate.
+      DEMUCS_MODEL: htdemucs_6s
+      # Chunk overlap: 0.25 spends a quarter of the compute re-processing seam audio.
+      DEMUCS_OVERLAP: "0.1"
+      MAX_UPLOAD_MB: "80"
+      # One at a time: Demucs saturates every core it is given, so concurrent jobs make
+      # each other slower and risk hitting the memory limit.
+      MAX_CONCURRENT_JOBS: "1"
+      ALLOWED_ORIGINS: "*"
+    volumes:
+      # Job artefacts and the cached Demucs weights. Named (not bind-mounted) so it
+      # behaves the same on a Linux server as it does on Docker Desktop.
+      - analyzer-data:/data
+      - ./log:/app/log
+    deploy:
+      resources:
+        limits:
+          # Demucs peaks around 3-4 GB on a full-length track; 6 leaves headroom without
+          # letting a runaway job take down the host.
+          memory: 6G
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: music-analyzer-web:latest
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      # 127.0.0.1 rather than localhost: busybox wget tries ::1 first and nginx listens
+      # on IPv4 only, which makes the hostname form fail.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+
+volumes:
+  analyzer-data:
