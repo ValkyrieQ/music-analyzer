@@ -473,3 +473,11 @@ synchronous callback returns, so the menu reads as empty. Click, sleep, then que
 - The API runs as non-root (uid 10001).
 - Job artefacts are pruned after 12 hours, on every job completion.
 - Backend logs go to both stdout and `/app/log/api.log`, bind-mounted to `./log/`.
+- **`backend/app` is `COPY`ed into the image, not bind-mounted** — unlike the frontend dev-mode
+  setup above, there is no live-reload path for backend code. Editing a `.py` file on the host
+  and testing it via `docker-compose exec api python3 -c "..."` silently runs the **old**
+  in-image copy until `docker-compose build api && docker-compose up -d` reruns. This produced a
+  real false result once: a fix looked like it hadn't worked because the container simply hadn't
+  been rebuilt yet. If a test contradicts an edit that was just made, rebuild before debugging
+  the code further — or confirm directly with `docker-compose exec api grep <new-string>
+  app/<file>.py`.
